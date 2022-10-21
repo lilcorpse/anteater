@@ -1,0 +1,119 @@
+import argparse
+import os
+import re
+import boto3
+#import ebb
+from botocore.exceptions import ClientError
+from io import IOBase
+import s3_list
+from nab.util import getOldDict, recur, writeJSON
+
+__all__ = ['s3_man']
+custom_session = None
+logging.basicConfig(filename='s3_man.log',level=logging.INFO)
+
+try:
+    import simplejson as json
+except ImportError:
+    import json
+
+def createThresholds(detectorName, thresholdFile):
+
+    oldThresholds = getOldDict(thresholdFile)
+
+    if detectorName not in oldThresholds:
+        oldThresholds[detectorName] = {}
+
+    writeJSON(thresholdFile, oldThresholds)
+
+def createResultsDir(detectorName, resultsDir, categorySubDirs):
+    directory = os.path.join(resultsDir, detectorName)
+
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+
+    for category in categorySubDirs:
+        subdir = os.path.join(directory, category)
+        if not os.path.exists(subdir):
+            os.makedirs(subdir)
+
+def _valid_ipv4_address(address):
+  RE_MATCH_OCTECT = r'(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)'
+  RE_MATCH_VALID_ADDR = (r'\b' 
+                             + RE_MATCH_OCTECT 
+                             + r'\.'
+                             + RE_MATCH_OCTECT 
+                             + r'\.'
+                             + RE_MATCH_OCTECT 
+                             + r'\.'
+                             + RE_MATCH_OCTECT 
+                       + r'\b')
+  return((re.match(RE_MATCH_VALID_ADDR, address)) and
+         (address.count('.') == 3))
+
+def _similar_to_ipv4_address(address):
+  """ Verify arg in IPv4 format; between 0.0.0.0 - 999.999.999.999
+  """
+  #legal characters limited to numbers and '.'
+  if(re.match(r'^[0-9.]+$', address)):
+    if(address.count('..') < 1):
+      if(address.count('.') == 3):   #ensure exactly four octects
+        return(True)
+
+  return(False)  
+
+  
+def _validate_s3_name_format(bucket_name):
+  """ NOTE: uses naming standard starting 3/2018; us-east-1 no longer 
+  accepts upper case letters and underscores for creating new buckets.
+  """
+  if((len(bucket_name) > 2) and (len(bucket_name) < 64)):
+    if((bucket_name[0].isalnum()) and (bucket_name[-1].isalnum())):
+      if(bucket_name == bucket_name.lower()):
+        #legal chars limted to alphanumeric, '-', '.'
+        if(re.match(r'^[a-z0-9.-]+$', bucket_name)):
+          #in case name is composed of labels, catch invalid labels
+          if((not '..' in bucket_name) and 
+             (not '-.' in bucket_name) and 
+             (not '.-' in bucket_name)):
+            if((not _valid_ipv4_address(bucket_name)) and
+               (not _similar_to_ipv4_address(bucket_name))):
+              return(True)
+  return(False)
+
+
+def _validate_s3_obj_name_format(object_name):
+  """ ensure arg is str or unicode that is no longer than 1024
+  """
+  is_valid = False
+  
+  if(object_name):
+    if(((isinstance(object_name, str)) or (isinstance(object_name, unicode)))
+        and len(object_name) < 1025):
+      is_valid = True
+  return(is_valid)
+
+
+def _create_custom_session(id, key, endpoint):
+  """ Attempt to create a custom boto3 session to overide use of the 
+  default profile located in the ".aws/credentials" file. 
+  """
+  global custom_session
+  custom_session = None
+  if(id.isalnum and (len(id)  == 20)):
+    if(re.match(r'^[A-Za-z0-9/+]*$', key) and (len(key) == 40)):
+      region = s3_list.validate_region(endpoint)
+      if(not region):
+        region = 'us-east-1'
+      
+      try:
+        custom_session = boto3.Session(aws_access_key_id= id, 
+                                       aws_secret_access_key= key,
+                                       region_name= region)
+        #ebb.start_server(simple_app, 4001)
+        
+        
+      except Exception as e:
+        custom_session = None
+        logging.error(f'Boto3 exception thrown: {e}') 
+
